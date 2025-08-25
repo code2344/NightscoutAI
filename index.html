@@ -203,6 +203,7 @@ button:disabled {
         <input type="url" id="nightscout-url" class="url-input" placeholder="Enter your Nightscout URL (e.g., https://yoursite.herokuapp.com)" value="https://rubensnightscout.herokuapp.com">
         <button id="unit-toggle">🔄 mg/dL</button>
         <button id="update-btn">🔄 Fetch & Train</button>
+        <button id="auto-train-toggle">⏰ Auto-Train: OFF</button>
         <button id="save-btn">💾 Save Model</button>
         <button id="load-btn">📂 Load Model</button>
     </div>
@@ -253,6 +254,10 @@ button:disabled {
             <div class="stat-label">Total Data Points</div>
             <div class="stat-value" id="total-data">-</div>
         </div>
+        <div class="stat-card">
+            <div class="stat-label">Anomalies Detected</div>
+            <div class="stat-value" id="anomalies-count">0</div>
+        </div>
     </div>
 
     <div id="chart-container">
@@ -287,6 +292,16 @@ const MMOL_TO_MGDL = 18.016;   // Conversion factor: mmol/L to mg/dL
 
 // Unit preferences
 let currentUnit = 'mgdl'; // 'mgdl' or 'mmol'
+
+// Auto-training settings
+let autoTrainEnabled = false;
+let autoTrainInterval = null;
+const AUTO_TRAIN_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+
+// Anomaly detection
+let detectedAnomalies = [];
+const ANOMALY_THRESHOLD_MGDL = 100; // mg/dL change threshold
+const ANOMALY_THRESHOLD_MMOL = 5.5; // mmol/L change threshold
 
 // Check if TensorFlow.js is available, if not use demo mode
 function initializeApp() {
@@ -451,6 +466,93 @@ function formatBgValue(bg, unit) {
     }
 }
 
+// ANOMALY DETECTION
+function detectAnomalies(data) {
+    if (!data || data.length < 3) return [];
+    
+    const anomalies = [];
+    const threshold = currentUnit === 'mmol' ? ANOMALY_THRESHOLD_MMOL : ANOMALY_THRESHOLD_MGDL;
+    
+    for (let i = 1; i < data.length - 1; i++) {
+        const prev = convertBgToCurrentUnit(data[i-1][0]);
+        const curr = convertBgToCurrentUnit(data[i][0]);
+        const next = convertBgToCurrentUnit(data[i+1][0]);
+        
+        // Check for sudden spike/drop that immediately reverses
+        const dropThenRise = (prev - curr > threshold) && (next - curr > threshold * 0.8);
+        const riseThenDrop = (curr - prev > threshold) && (curr - next > threshold * 0.8);
+        
+        // Check for extreme values that are outliers
+        const isExtreme = curr < (currentUnit === 'mmol' ? 2.2 : 40) || curr > (currentUnit === 'mmol' ? 22.2 : 400);
+        
+        // Check for impossible rate of change (>5 mmol/L or >90 mg/dL per 5 minutes)
+        const timeDiffMinutes = (data[i][3] - data[i-1][3]) / (1000 * 60);
+        const rateOfChange = Math.abs(curr - prev) / Math.max(timeDiffMinutes / 5, 1);
+        const impossibleRate = rateOfChange > (currentUnit === 'mmol' ? 5 : 90);
+        
+        if (dropThenRise || riseThenDrop || isExtreme || impossibleRate) {
+            anomalies.push({
+                index: i,
+                timestamp: data[i][3],
+                value: curr,
+                type: dropThenRise ? 'spike-down' : riseThenDrop ? 'spike-up' : isExtreme ? 'extreme' : 'rate',
+                reason: dropThenRise ? 'Sudden drop then recovery' : 
+                       riseThenDrop ? 'Sudden rise then drop' :
+                       isExtreme ? 'Extreme value' : 'Impossible rate of change'
+            });
+        }
+    }
+    
+    return anomalies;
+}
+
+function filterAnomalies(data, anomalies) {
+    if (!anomalies || anomalies.length === 0) return data;
+    
+    const anomalyIndices = new Set(anomalies.map(a => a.index));
+    return data.filter((_, index) => !anomalyIndices.has(index));
+}
+
+// AUTO-TRAINING FUNCTIONS
+function startAutoTraining() {
+    if (autoTrainInterval) {
+        clearInterval(autoTrainInterval);
+    }
+    
+    autoTrainInterval = setInterval(async () => {
+        if (!document.getElementById('update-btn').disabled) {
+            console.log('Auto-training: Fetching new data...');
+            try {
+                await updateUI();
+                console.log('Auto-training: Successfully updated model');
+            } catch (error) {
+                console.error('Auto-training error:', error);
+            }
+        }
+    }, AUTO_TRAIN_INTERVAL_MS);
+    
+    showSuccess(`Auto-training enabled! Model will update every ${AUTO_TRAIN_INTERVAL_MS / 60000} minutes.`);
+}
+
+function stopAutoTraining() {
+    if (autoTrainInterval) {
+        clearInterval(autoTrainInterval);
+        autoTrainInterval = null;
+    }
+    showSuccess('Auto-training disabled.');
+}
+
+function updateAutoTrainButton() {
+    const button = document.getElementById('auto-train-toggle');
+    if (autoTrainEnabled) {
+        button.textContent = '⏰ Auto-Train: ON';
+        button.style.background = 'linear-gradient(135deg, #16a34a 0%, #15803d 100%)';
+    } else {
+        button.textContent = '⏰ Auto-Train: OFF';
+        button.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+    }
+}
+
 function getCurrentUnitLabel() {
     return currentUnit === 'mmol' ? 'mmol/L' : 'mg/dL';
 }
@@ -541,6 +643,7 @@ function updateStatsUI(totalPoints){
     document.getElementById('seq-len').textContent = SEQ_LEN;
     document.getElementById('lstm-units').textContent = LSTM_UNITS;
     document.getElementById('total-data').textContent = totalPoints.toLocaleString();
+    document.getElementById('anomalies-count').textContent = detectedAnomalies.length.toLocaleString();
 }
 
 function updateUnitLabels() {
@@ -565,7 +668,17 @@ async function fetchAllData(){
 async function fetchAllData(){
     if (isDemoMode) {
         showSuccess('Using demo data for testing');
-        return DEMO_DATA;
+        // Detect anomalies in demo data
+        detectedAnomalies = detectAnomalies(DEMO_DATA);
+        
+        // Filter out anomalies for training (but keep them for display)
+        const cleanData = filterAnomalies(DEMO_DATA, detectedAnomalies);
+        
+        if (detectedAnomalies.length > 0) {
+            console.log(`Detected ${detectedAnomalies.length} potential anomalies in demo data:`, detectedAnomalies);
+        }
+        
+        return cleanData;
     }
     
     try{
@@ -586,9 +699,21 @@ async function fetchAllData(){
             throw new Error('No data received from Nightscout API');
         }
         
-        return data.map(e=>[e.sgv, e.insulin||0, e.carbs||0, new Date(e.dateString || e.date).getTime()])
+        const processedData = data.map(e=>[e.sgv, e.insulin||0, e.carbs||0, new Date(e.dateString || e.date).getTime()])
                    .filter(e => !isNaN(e[0]) && e[0] > 0 && e[0] < 1000) // filter invalid BG readings
                    .sort((a,b)=>a[3]-b[3]); // sort by timestamp
+        
+        // Detect anomalies
+        detectedAnomalies = detectAnomalies(processedData);
+        
+        // Filter out anomalies for training (but keep them for display)
+        const cleanData = filterAnomalies(processedData, detectedAnomalies);
+        
+        if (detectedAnomalies.length > 0) {
+            console.log(`Detected ${detectedAnomalies.length} potential anomalies:`, detectedAnomalies);
+        }
+        
+        return cleanData;
     }catch(err){ 
         console.error("Error fetching Nightscout:", err); 
         throw err;
@@ -668,7 +793,11 @@ async function updateUI(){
             chart.update();
         }
         
-        showSuccess(`Successfully processed ${allData.length} data points and trained the model!`);
+        if (detectedAnomalies.length > 0) {
+            showSuccess(`Successfully processed ${allData.length} data points, detected ${detectedAnomalies.length} anomalies, and trained the model!`);
+        } else {
+            showSuccess(`Successfully processed ${allData.length} data points and trained the model!`);
+        }
         
     } catch (error) {
         showError(`Error: ${error.message}`);
@@ -716,10 +845,54 @@ async function loadModel() {
 document.getElementById('update-btn').addEventListener('click', updateUI);
 document.getElementById('save-btn').addEventListener('click', saveModel);
 document.getElementById('load-btn').addEventListener('click', loadModel);
+document.getElementById('auto-train-toggle').addEventListener('click', function() {
+    autoTrainEnabled = !autoTrainEnabled;
+    localStorage.setItem('auto-train', autoTrainEnabled);
+    updateAutoTrainButton();
+    
+    if (autoTrainEnabled) {
+        startAutoTraining();
+    } else {
+        stopAutoTraining();
+    }
+});
 document.getElementById('unit-toggle').addEventListener('click', function() {
     currentUnit = currentUnit === 'mgdl' ? 'mmol' : 'mgdl';
     localStorage.setItem('bg-unit', currentUnit);
     updateUnitLabels();
+    
+    // Update displayed values if we have data
+    const latestBgEl = document.getElementById('latest-bg');
+    const predictedBgEl = document.getElementById('predicted-bg');
+    
+    if (latestBgEl.textContent !== '-' && !isNaN(parseFloat(latestBgEl.textContent))) {
+        // Convert and update current BG display
+        let currentBgValue = parseFloat(latestBgEl.textContent);
+        // If switching from mg/dL to mmol/L, convert
+        if (currentUnit === 'mmol' && currentBgValue > 30) {
+            currentBgValue = mgdlToMmol(currentBgValue);
+        }
+        // If switching from mmol/L to mg/dL, convert
+        else if (currentUnit === 'mgdl' && currentBgValue < 30) {
+            currentBgValue = mmolToMgdl(currentBgValue);
+        }
+        latestBgEl.textContent = formatBgValue(currentBgValue, currentUnit);
+    }
+    
+    if (predictedBgEl.textContent !== '-' && !isNaN(parseFloat(predictedBgEl.textContent))) {
+        // Convert and update predicted BG display
+        let predictedBgValue = parseFloat(predictedBgEl.textContent);
+        // If switching from mg/dL to mmol/L, convert
+        if (currentUnit === 'mmol' && predictedBgValue > 30) {
+            predictedBgValue = mgdlToMmol(predictedBgValue);
+        }
+        // If switching from mmol/L to mg/dL, convert
+        else if (currentUnit === 'mgdl' && predictedBgValue < 30) {
+            predictedBgValue = mmolToMgdl(predictedBgValue);
+        }
+        predictedBgEl.textContent = formatBgValue(predictedBgValue, currentUnit);
+    }
+    
     // Reset training stats when switching units
     totalLoss = 0;
     totalPredError = 0;
@@ -742,6 +915,13 @@ document.addEventListener('DOMContentLoaded', function() {
         currentUnit = savedUnit;
     }
     updateUnitLabels();
+    
+    // Load saved auto-train preference
+    const savedAutoTrain = localStorage.getItem('auto-train');
+    if (savedAutoTrain === 'true') {
+        autoTrainEnabled = true;
+    }
+    updateAutoTrainButton();
     
     // Initialize the app
     setTimeout(initializeApp, 100); // Give time for external scripts to load
@@ -770,6 +950,11 @@ document.addEventListener('DOMContentLoaded', function() {
         updateUI();
     });
     document.querySelector('.controls').appendChild(demoBtn);
+    
+    // Start auto-training if enabled
+    if (autoTrainEnabled) {
+        startAutoTraining();
+    }
 });
 
 // OPTIONAL: auto-update every 5 min (disabled by default to avoid API spam)
