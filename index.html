@@ -351,8 +351,8 @@ function showSuccess(message) {
 // CHART SETUP
 function initializeChart() {
     if (typeof Chart === 'undefined') {
-        console.log('Chart.js not available, charts disabled');
-        document.getElementById('chart-container').innerHTML = '<p>Charts not available - external libraries not loaded</p>';
+        console.log('Chart.js not available, using fallback canvas chart');
+        createFallbackChart();
         return;
     }
     
@@ -432,6 +432,204 @@ function initializeChart() {
 
     // Set chart container height
     document.getElementById('chart-container').style.height = '400px';
+}
+
+// FALLBACK CHART IMPLEMENTATION
+function createFallbackChart() {
+    const container = document.getElementById('chart-container');
+    container.innerHTML = `
+        <div style="text-align: center; padding: 20px;">
+            <h3 style="margin-bottom: 20px; color: #4a5568;">Blood Glucose Prediction Chart</h3>
+            <div style="display: flex; justify-content: center; gap: 20px; margin-bottom: 15px;">
+                <span style="display: flex; align-items: center; gap: 5px;">
+                    <div style="width: 20px; height: 3px; background-color: #667eea;"></div>
+                    Actual BG
+                </span>
+                <span style="display: flex; align-items: center; gap: 5px;">
+                    <div style="width: 20px; height: 3px; background-color: #f5576c; border-style: dashed;"></div>
+                    Predicted BG
+                </span>
+            </div>
+            <canvas id="fallback-chart" width="800" height="400" style="border: 1px solid #e2e8f0; border-radius: 8px; max-width: 100%;"></canvas>
+        </div>
+    `;
+    
+    // Initialize fallback chart object
+    chart = {
+        data: { labels: [], datasets: [{ data: [] }, { data: [] }] },
+        update: updateFallbackChart,
+        options: { scales: { y: { suggestedMin: 40, suggestedMax: 400 } } }
+    };
+    
+    container.style.height = '500px';
+}
+
+function updateFallbackChart() {
+    const canvas = document.getElementById('fallback-chart');
+    if (!canvas) return;
+    
+    const ctx = canvas.getContext('2d');
+    const width = canvas.width;
+    const height = canvas.height;
+    const padding = 60;
+    const chartWidth = width - padding * 2;
+    const chartHeight = height - padding * 2;
+    
+    // Clear canvas
+    ctx.clearRect(0, 0, width, height);
+    
+    // Get data
+    const actualData = chart.data.datasets[0].data;
+    const predictedData = chart.data.datasets[1].data;
+    const labels = chart.data.labels;
+    
+    if (!actualData || actualData.length === 0) {
+        ctx.fillStyle = '#64748b';
+        ctx.font = '16px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText('No data available yet. Click "Demo Mode" or "Fetch & Train" to see the chart.', width/2, height/2);
+        return;
+    }
+    
+    // Determine Y axis range
+    const allValues = [...actualData, ...predictedData.filter(v => v !== null)];
+    const minValue = Math.min(...allValues);
+    const maxValue = Math.max(...allValues);
+    const yMin = Math.max(0, minValue - (maxValue - minValue) * 0.1);
+    const yMax = maxValue + (maxValue - minValue) * 0.1;
+    
+    // Draw background
+    ctx.fillStyle = '#f8fafc';
+    ctx.fillRect(padding, padding, chartWidth, chartHeight);
+    
+    // Draw grid lines
+    ctx.strokeStyle = '#e2e8f0';
+    ctx.lineWidth = 1;
+    
+    // Horizontal grid lines
+    for (let i = 0; i <= 5; i++) {
+        const y = padding + (i / 5) * chartHeight;
+        ctx.beginPath();
+        ctx.moveTo(padding, y);
+        ctx.lineTo(padding + chartWidth, y);
+        ctx.stroke();
+        
+        // Y axis labels
+        const value = yMax - (i / 5) * (yMax - yMin);
+        ctx.fillStyle = '#64748b';
+        ctx.font = '12px Arial';
+        ctx.textAlign = 'right';
+        ctx.fillText(Math.round(value).toString(), padding - 10, y + 4);
+    }
+    
+    // Vertical grid lines
+    const stepSize = Math.max(1, Math.floor(actualData.length / 10));
+    for (let i = 0; i < actualData.length; i += stepSize) {
+        const x = padding + (i / (actualData.length - 1)) * chartWidth;
+        ctx.beginPath();
+        ctx.moveTo(x, padding);
+        ctx.lineTo(x, padding + chartHeight);
+        ctx.stroke();
+    }
+    
+    // Helper function to get Y coordinate
+    function getY(value) {
+        return padding + chartHeight - ((value - yMin) / (yMax - yMin)) * chartHeight;
+    }
+    
+    // Helper function to get X coordinate
+    function getX(index) {
+        return padding + (index / (actualData.length - 1)) * chartWidth;
+    }
+    
+    // Draw actual BG line
+    if (actualData.length > 1) {
+        ctx.strokeStyle = '#667eea';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        
+        for (let i = 0; i < actualData.length; i++) {
+            const x = getX(i);
+            const y = getY(actualData[i]);
+            
+            if (i === 0) {
+                ctx.moveTo(x, y);
+            } else {
+                ctx.lineTo(x, y);
+            }
+        }
+        ctx.stroke();
+        
+        // Draw actual BG points
+        ctx.fillStyle = '#667eea';
+        for (let i = 0; i < actualData.length; i++) {
+            const x = getX(i);
+            const y = getY(actualData[i]);
+            ctx.beginPath();
+            ctx.arc(x, y, 3, 0, 2 * Math.PI);
+            ctx.fill();
+        }
+    }
+    
+    // Draw predicted BG line
+    if (predictedData.length > 1) {
+        ctx.strokeStyle = '#f5576c';
+        ctx.lineWidth = 3;
+        ctx.setLineDash([8, 4]);
+        ctx.beginPath();
+        
+        let lastValidIndex = -1;
+        for (let i = 0; i < predictedData.length; i++) {
+            if (predictedData[i] !== null) {
+                const x = getX(i);
+                const y = getY(predictedData[i]);
+                
+                if (lastValidIndex === -1) {
+                    ctx.moveTo(x, y);
+                } else {
+                    ctx.lineTo(x, y);
+                }
+                lastValidIndex = i;
+            }
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+        
+        // Draw predicted BG points
+        ctx.fillStyle = '#f5576c';
+        for (let i = 0; i < predictedData.length; i++) {
+            if (predictedData[i] !== null) {
+                const x = getX(i);
+                const y = getY(predictedData[i]);
+                ctx.beginPath();
+                ctx.arc(x, y, 3, 0, 2 * Math.PI);
+                ctx.fill();
+            }
+        }
+    }
+    
+    // Draw axes
+    ctx.strokeStyle = '#4a5568';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(padding, padding);
+    ctx.lineTo(padding, padding + chartHeight);
+    ctx.lineTo(padding + chartWidth, padding + chartHeight);
+    ctx.stroke();
+    
+    // Y axis title
+    ctx.fillStyle = '#4a5568';
+    ctx.font = '14px Arial';
+    ctx.save();
+    ctx.translate(20, padding + chartHeight/2);
+    ctx.rotate(-Math.PI/2);
+    ctx.textAlign = 'center';
+    ctx.fillText(`Blood Glucose (${getCurrentUnitLabel()})`, 0, 0);
+    ctx.restore();
+    
+    // X axis title
+    ctx.textAlign = 'center';
+    ctx.fillText('Time Points', padding + chartWidth/2, height - 20);
 }
 
 // HELPERS
@@ -786,10 +984,13 @@ async function updateUI(){
             }
             chart.data.datasets[1].data = Array(SEQ_LEN-1).fill(null).concat(preds);
             
-            // Update chart y-axis range and title
-            chart.options.scales.y.suggestedMin = currentUnit === 'mmol' ? 2 : 40;
-            chart.options.scales.y.suggestedMax = currentUnit === 'mmol' ? 22 : 400;
-            chart.options.scales.y.title.text = `Blood Glucose (${getCurrentUnitLabel()})`;
+            // Update chart y-axis range and title for Chart.js
+            if (chart.options && chart.options.scales) {
+                chart.options.scales.y.suggestedMin = currentUnit === 'mmol' ? 2 : 40;
+                chart.options.scales.y.suggestedMax = currentUnit === 'mmol' ? 22 : 400;
+                chart.options.scales.y.title.text = `Blood Glucose (${getCurrentUnitLabel()})`;
+            }
+            
             chart.update();
         }
         
