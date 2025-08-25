@@ -201,6 +201,7 @@ button:disabled {
     
     <div class="controls">
         <input type="url" id="nightscout-url" class="url-input" placeholder="Enter your Nightscout URL (e.g., https://yoursite.herokuapp.com)" value="https://rubensnightscout.herokuapp.com">
+        <button id="unit-toggle">🔄 mg/dL</button>
         <button id="update-btn">🔄 Fetch & Train</button>
         <button id="save-btn">💾 Save Model</button>
         <button id="load-btn">📂 Load Model</button>
@@ -218,12 +219,12 @@ button:disabled {
         <div class="reading-card">
             <div class="reading-label">Current BG</div>
             <div class="reading-value" id="latest-bg">-</div>
-            <div class="reading-label">mg/dL</div>
+            <div class="reading-label" id="current-unit-label">mg/dL</div>
         </div>
         <div class="reading-card">
             <div class="reading-label">Predicted BG</div>
             <div class="reading-value" id="predicted-bg">-</div>
-            <div class="reading-label">mg/dL</div>
+            <div class="reading-label" id="predicted-unit-label">mg/dL</div>
         </div>
     </div>
 
@@ -279,7 +280,13 @@ let NIGHTSCOUT_URL = 'https://rubensnightscout.herokuapp.com';
 const SEQ_LEN = 10;  // sliding window length
 const FEATURES = 3;  // [bg, insulin, carbs]
 const LSTM_UNITS = 16;
-const BG_MIN = 40, BG_MAX = 400;  // for normalization
+const BG_MIN_MGDL = 40, BG_MAX_MGDL = 400;  // for normalization in mg/dL
+const BG_MIN_MMOL = 2.2, BG_MAX_MMOL = 22.2;  // for normalization in mmol/L
+const MGDL_TO_MMOL = 0.0555;  // Conversion factor: mg/dL to mmol/L
+const MMOL_TO_MGDL = 18.016;   // Conversion factor: mmol/L to mg/dL
+
+// Unit preferences
+let currentUnit = 'mgdl'; // 'mgdl' or 'mmol'
 
 // Check if TensorFlow.js is available, if not use demo mode
 function initializeApp() {
@@ -390,11 +397,11 @@ function initializeChart() {
                 }, 
                 y: {
                     display: true, 
-                    suggestedMin: 40, 
-                    suggestedMax: 400,
+                    suggestedMin: currentUnit === 'mmol' ? 2 : 40, 
+                    suggestedMax: currentUnit === 'mmol' ? 22 : 400,
                     title: {
                         display: true,
-                        text: 'Blood Glucose (mg/dL)'
+                        text: `Blood Glucose (${getCurrentUnitLabel()})`
                     },
                     grid: {
                         color: 'rgba(0,0,0,0.1)'
@@ -413,8 +420,40 @@ function initializeChart() {
 }
 
 // HELPERS
-function normalizeBG(bg){ return (bg-BG_MIN)/(BG_MAX-BG_MIN); }
-function denormalizeBG(norm){ return norm*(BG_MAX-BG_MIN)+BG_MIN; }
+function mgdlToMmol(mgdl) { return mgdl * MGDL_TO_MMOL; }
+function mmolToMgdl(mmol) { return mmol * MMOL_TO_MGDL; }
+
+function normalizeBG(bg) { 
+    if (currentUnit === 'mmol') {
+        return (bg - BG_MIN_MMOL) / (BG_MAX_MMOL - BG_MIN_MMOL);
+    } else {
+        return (bg - BG_MIN_MGDL) / (BG_MAX_MGDL - BG_MIN_MGDL);
+    }
+}
+
+function denormalizeBG(norm) { 
+    if (currentUnit === 'mmol') {
+        return norm * (BG_MAX_MMOL - BG_MIN_MMOL) + BG_MIN_MMOL;
+    } else {
+        return norm * (BG_MAX_MGDL - BG_MIN_MGDL) + BG_MIN_MGDL;
+    }
+}
+
+function convertBgToCurrentUnit(bgMgdl) {
+    return currentUnit === 'mmol' ? mgdlToMmol(bgMgdl) : bgMgdl;
+}
+
+function formatBgValue(bg, unit) {
+    if (unit === 'mmol') {
+        return bg.toFixed(1);
+    } else {
+        return Math.round(bg).toString();
+    }
+}
+
+function getCurrentUnitLabel() {
+    return currentUnit === 'mmol' ? 'mmol/L' : 'mg/dL';
+}
 function addReading(reading){
     sequenceBuffer.push(reading);
     if(sequenceBuffer.length > SEQ_LEN) sequenceBuffer.shift();
@@ -439,8 +478,10 @@ async function trainOnSequence(seq){
     const totalTrainingSteps = seq.length - SEQ_LEN + 1;
     
     for(let i=0;i<=seq.length-SEQ_LEN;i++){
-        const inputSeq = seq.slice(i,i+SEQ_LEN-1).map(r=>[normalizeBG(r[0]), r[1], r[2]]);
-        const targetBG = normalizeBG(seq[i+SEQ_LEN-1][0]);
+        // Convert BG values to current unit for training
+        const bgInCurrentUnit = convertBgToCurrentUnit(seq[i+SEQ_LEN-1][0]);
+        const inputSeq = seq.slice(i,i+SEQ_LEN-1).map(r=>[normalizeBG(convertBgToCurrentUnit(r[0])), r[1], r[2]]);
+        const targetBG = normalizeBG(bgInCurrentUnit);
         const X = bufferToTensor(inputSeq);
         const Y = tf.tensor([[targetBG]]);
         
@@ -448,7 +489,7 @@ async function trainOnSequence(seq){
             const loss = await model.trainOnBatch(X,Y);
             totalLoss += loss;
             const pred = denormalizeBG(model.predict(X).dataSync()[0]);
-            totalPredError += Math.abs(pred - seq[i+SEQ_LEN-1][0]);
+            totalPredError += Math.abs(pred - bgInCurrentUnit);
             count++;
             trainedCount++;
         } catch (error) {
@@ -470,15 +511,17 @@ function predictNext(){
     if (isDemoMode) {
         // Simple prediction for demo: average of last few readings with some trend
         if (sequenceBuffer.length < 3) return null;
-        const recent = sequenceBuffer.slice(-3).map(r => r[0]);
+        const recent = sequenceBuffer.slice(-3).map(r => convertBgToCurrentUnit(r[0]));
         const avg = recent.reduce((a, b) => a + b) / recent.length;
         const trend = (recent[recent.length - 1] - recent[0]) / recent.length;
-        return Math.max(60, Math.min(300, avg + trend * 2));
+        const minBg = currentUnit === 'mmol' ? 3.3 : 60;
+        const maxBg = currentUnit === 'mmol' ? 16.7 : 300;
+        return Math.max(minBg, Math.min(maxBg, avg + trend * 2));
     }
     
     if(sequenceBuffer.length < SEQ_LEN) return null;
     try {
-        const inputSeq = sequenceBuffer.slice(0,SEQ_LEN-1).map(r=>[normalizeBG(r[0]), r[1], r[2]]);
+        const inputSeq = sequenceBuffer.slice(0,SEQ_LEN-1).map(r=>[normalizeBG(convertBgToCurrentUnit(r[0])), r[1], r[2]]);
         const X = bufferToTensor(inputSeq);
         const predNorm = model.predict(X).dataSync()[0];
         X.dispose();
@@ -492,11 +535,19 @@ function predictNext(){
 // UPDATE UI
 function updateStatsUI(totalPoints){
     document.getElementById('avg-loss').textContent = (count>0? (totalLoss/count).toFixed(4) : '-');
-    document.getElementById('avg-error').textContent = (count>0? (totalPredError/count).toFixed(2) + ' mg/dL' : '-');
+    const errorText = count>0? (totalPredError/count).toFixed(2) + ' ' + getCurrentUnitLabel() : '-';
+    document.getElementById('avg-error').textContent = errorText;
     document.getElementById('train-steps').textContent = count.toLocaleString();
     document.getElementById('seq-len').textContent = SEQ_LEN;
     document.getElementById('lstm-units').textContent = LSTM_UNITS;
     document.getElementById('total-data').textContent = totalPoints.toLocaleString();
+}
+
+function updateUnitLabels() {
+    const unitLabel = getCurrentUnitLabel();
+    document.getElementById('current-unit-label').textContent = unitLabel;
+    document.getElementById('predicted-unit-label').textContent = unitLabel;
+    document.getElementById('unit-toggle').textContent = `🔄 ${unitLabel}`;
 }
 
 // FETCH ALL NIGHTSCOUT DATA
@@ -561,12 +612,12 @@ async function updateUI(){
 
         await trainOnSequence(allData);
 
-        const latestBG = allData[allData.length-1][0];
-        document.getElementById('latest-bg').textContent = Math.round(latestBG);
+        const latestBG = convertBgToCurrentUnit(allData[allData.length-1][0]);
+        document.getElementById('latest-bg').textContent = formatBgValue(latestBG, currentUnit);
 
         const nextBG = predictNext();
         if(nextBG !== null) {
-            document.getElementById('predicted-bg').textContent = Math.round(nextBG);
+            document.getElementById('predicted-bg').textContent = formatBgValue(nextBG, currentUnit);
         } else {
             document.getElementById('predicted-bg').textContent = 'Error';
         }
@@ -581,23 +632,27 @@ async function updateUI(){
             });
             
             chart.data.labels = timeLabels;
-            chart.data.datasets[0].data = allData.map(d=>Math.round(d[0]));
+            chart.data.datasets[0].data = allData.map(d=>parseFloat(formatBgValue(convertBgToCurrentUnit(d[0]), currentUnit)));
             
             const preds = [];
             if (isDemoMode) {
                 // Simple predictions for demo mode
                 for(let i=SEQ_LEN-1;i<allData.length;i++){
-                    const recent = allData.slice(Math.max(0, i-2), i+1).map(r => r[0]);
+                    const recent = allData.slice(Math.max(0, i-2), i+1).map(r => convertBgToCurrentUnit(r[0]));
                     const avg = recent.reduce((a, b) => a + b) / recent.length;
                     const trend = recent.length > 1 ? (recent[recent.length - 1] - recent[0]) / recent.length : 0;
-                    preds.push(Math.round(Math.max(60, Math.min(300, avg + trend * 1.5))));
+                    const minBg = currentUnit === 'mmol' ? 3.3 : 60;
+                    const maxBg = currentUnit === 'mmol' ? 16.7 : 300;
+                    const predValue = Math.max(minBg, Math.min(maxBg, avg + trend * 1.5));
+                    preds.push(parseFloat(formatBgValue(predValue, currentUnit)));
                 }
             } else {
                 for(let i=SEQ_LEN-1;i<allData.length;i++){
                     try {
-                        const inputSeq = allData.slice(i-(SEQ_LEN-1),i).map(r=>[normalizeBG(r[0]), r[1], r[2]]);
+                        const inputSeq = allData.slice(i-(SEQ_LEN-1),i).map(r=>[normalizeBG(convertBgToCurrentUnit(r[0])), r[1], r[2]]);
                         const X = bufferToTensor(inputSeq);
-                        preds.push(Math.round(denormalizeBG(model.predict(X).dataSync()[0])));
+                        const predValue = denormalizeBG(model.predict(X).dataSync()[0]);
+                        preds.push(parseFloat(formatBgValue(predValue, currentUnit)));
                         X.dispose();
                     } catch (error) {
                         preds.push(null);
@@ -605,6 +660,11 @@ async function updateUI(){
                 }
             }
             chart.data.datasets[1].data = Array(SEQ_LEN-1).fill(null).concat(preds);
+            
+            // Update chart y-axis range and title
+            chart.options.scales.y.suggestedMin = currentUnit === 'mmol' ? 2 : 40;
+            chart.options.scales.y.suggestedMax = currentUnit === 'mmol' ? 22 : 400;
+            chart.options.scales.y.title.text = `Blood Glucose (${getCurrentUnitLabel()})`;
             chart.update();
         }
         
@@ -656,6 +716,16 @@ async function loadModel() {
 document.getElementById('update-btn').addEventListener('click', updateUI);
 document.getElementById('save-btn').addEventListener('click', saveModel);
 document.getElementById('load-btn').addEventListener('click', loadModel);
+document.getElementById('unit-toggle').addEventListener('click', function() {
+    currentUnit = currentUnit === 'mgdl' ? 'mmol' : 'mgdl';
+    localStorage.setItem('bg-unit', currentUnit);
+    updateUnitLabels();
+    // Reset training stats when switching units
+    totalLoss = 0;
+    totalPredError = 0;
+    count = 0;
+    showSuccess(`Switched to ${getCurrentUnitLabel()}. Please retrain the model for accurate predictions.`);
+});
 
 // URL validation
 document.getElementById('nightscout-url').addEventListener('input', function(e) {
@@ -666,6 +736,13 @@ document.getElementById('nightscout-url').addEventListener('input', function(e) 
 
 // Initialize UI
 document.addEventListener('DOMContentLoaded', function() {
+    // Load saved unit preference
+    const savedUnit = localStorage.getItem('bg-unit');
+    if (savedUnit && (savedUnit === 'mgdl' || savedUnit === 'mmol')) {
+        currentUnit = savedUnit;
+    }
+    updateUnitLabels();
+    
     // Initialize the app
     setTimeout(initializeApp, 100); // Give time for external scripts to load
     
