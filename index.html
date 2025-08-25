@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nightscout BG Predictor Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.5.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+body { font-family: sans-serif; padding: 20px; }
+h1 { font-size: 1.5em; }
+button { padding: 10px; margin: 5px; }
+.stats { margin-top: 20px; }
+#chart-container { width:100%; max-width:600px; margin-top:20px; }
+</style>
+</head>
+<body>
+<h1>Nightscout BG Predictor Dashboard</h1>
+
+<p>Latest BG: <span id="latest-bg">-</span></p>
+<p>Next predicted BG: <span id="predicted-bg">-</span></p>
+
+<div class="stats">
+    <p>Average Loss: <span id="avg-loss">-</span></p>
+    <p>Average Prediction Error: <span id="avg-error">-</span></p>
+    <p>Total Training Steps: <span id="train-steps">0</span></p>
+    <p>Sequence Length: <span id="seq-len">-</span></p>
+    <p>LSTM Units: <span id="lstm-units">-</span></p>
+    <p>Total Data Points: <span id="total-data">-</span></p>
+</div>
+
+<button id="update-btn">Fetch & Train</button>
+<button id="save-btn">Save Model</button>
+
+<div id="chart-container">
+    <canvas id="bg-chart"></canvas>
+</div>
+
+<script>
+// CONFIG
+const NIGHTSCOUT_URL = 'https://rubensnightscout.herokuapp.com';
+const SEQ_LEN = 10;  // sliding window length
+const FEATURES = 3;  // [bg, insulin, carbs]
+const LSTM_UNITS = 16;
+const BG_MIN = 40, BG_MAX = 400;  // for normalization
+
+// MODEL SETUP
+const model = tf.sequential();
+model.add(tf.layers.lstm({units:LSTM_UNITS, inputShape:[SEQ_LEN-1, FEATURES]}));
+model.add(tf.layers.dense({units:1}));
+model.compile({optimizer:'adam', loss:'meanSquaredError'});
+
+// DATA BUFFER & STATS
+let sequenceBuffer = [];
+let totalLoss = 0, totalPredError = 0, count = 0;
+
+// CHART SETUP
+const ctx = document.getElementById('bg-chart').getContext('2d');
+const chart = new Chart(ctx, {
+    type: 'line',
+    data: { labels: [], datasets: [
+        { label:'Actual BG', data:[], borderColor:'blue', fill:false },
+        { label:'Predicted BG', data:[], borderColor:'red', fill:false }
+    ]},
+    options:{ responsive:true, scales:{ x:{display:true}, y:{display:true, suggestedMin:40, suggestedMax:400} } }
+});
+
+// HELPERS
+function normalizeBG(bg){ return (bg-BG_MIN)/(BG_MAX-BG_MIN); }
+function denormalizeBG(norm){ return norm*(BG_MAX-BG_MIN)+BG_MIN; }
+function addReading(reading){
+    sequenceBuffer.push(reading);
+    if(sequenceBuffer.length > SEQ_LEN) sequenceBuffer.shift();
+}
+function bufferToTensor(buffer){
+    return tf.tensor([buffer]);
+}
+
+// TRAINING ON SEQUENCES
+async function trainOnSequence(seq){
+    if(seq.length < SEQ_LEN) return;
+    for(let i=0;i<=seq.length-SEQ_LEN;i++){
+        const inputSeq = seq.slice(i,i+SEQ_LEN-1).map(r=>[normalizeBG(r[0]), r[1], r[2]]);
+        const targetBG = normalizeBG(seq[i+SEQ_LEN-1][0]);
+        const X = bufferToTensor(inputSeq);
+        const Y = tf.tensor([[targetBG]]);
+        const loss = await model.trainOnBatch(X,Y);
+        totalLoss += loss;
+        const pred = denormalizeBG(model.predict(X).dataSync()[0]);
+        totalPredError += Math.abs(pred - seq[i+SEQ_LEN-1][0]);
+        count++;
+        X.dispose(); Y.dispose();
+    }
+}
+
+// PREDICT NEXT BG
+function predictNext(){
+    if(sequenceBuffer.length < SEQ_LEN) return null;
+    const inputSeq = sequenceBuffer.slice(0,SEQ_LEN-1).map(r=>[normalizeBG(r[0]), r[1], r[2]]);
+    const X = bufferToTensor(inputSeq);
+    const predNorm = model.predict(X).dataSync()[0];
+    X.dispose();
+    return denormalizeBG(predNorm);
+}
+
+// UPDATE UI
+function updateStatsUI(totalPoints){
+    document.getElementById('avg-loss').textContent = (count>0? (totalLoss/count).toFixed(4) : '-');
+    document.getElementById('avg-error').textContent = (count>0? (totalPredError/count).toFixed(2) : '-');
+    document.getElementById('train-steps').textContent = count;
+    document.getElementById('seq-len').textContent = SEQ_LEN;
+    document.getElementById('lstm-units').textContent = LSTM_UNITS;
+    document.getElementById('total-data').textContent = totalPoints;
+}
+
+// FETCH ALL NIGHTSCOUT DATA
+async function fetchAllData(){
+    try{
+        const res = await fetch(`${NIGHTSCOUT_URL}/api/v1/entries.json`);
+        const data = await res.json();
+        return data.map(e=>[e.sgv, e.insulin||0, e.carbs||0])
+                   .sort((a,b)=>a[0]-b[0]);
+    }catch(err){ console.error("Error fetching Nightscout:", err); return []; }
+}
+
+// UPDATE DASHBOARD
+async function updateUI(){
+    const allData = await fetchAllData();
+    if(allData.length === 0) return;
+
+    sequenceBuffer = allData.slice(-SEQ_LEN); // initialize buffer
+
+    await trainOnSequence(allData);
+
+    const latestBG = allData[allData.length-1][0];
+    document.getElementById('latest-bg').textContent = latestBG;
+
+    const nextBG = predictNext();
+    if(nextBG !== null) document.getElementById('predicted-bg').textContent = Math.round(nextBG);
+
+    updateStatsUI(allData.length);
+
+    // update chart
+    chart.data.labels = allData.map((_,i)=>i+1);
+    chart.data.datasets[0].data = allData.map(d=>d[0]);
+    const preds = [];
+    for(let i=SEQ_LEN-1;i<allData.length;i++){
+        const inputSeq = allData.slice(i-(SEQ_LEN-1),i).map(r=>[normalizeBG(r[0]), r[1], r[2]]);
+        const X = bufferToTensor(inputSeq);
+        preds.push(Math.round(denormalizeBG(model.predict(X).dataSync()[0])));
+        X.dispose();
+    }
+    chart.data.datasets[1].data = Array(SEQ_LEN-1).fill(null).concat(preds);
+    chart.update();
+}
+
+// BUTTON HANDLERS
+document.getElementById('update-btn').addEventListener('click', updateUI);
+document.getElementById('save-btn').addEventListener('click', async ()=>{
+    await model.save('downloads://bg_model');
+    alert('Model saved locally!');
+});
+
+// OPTIONAL: auto-update every 5 min
+setInterval(updateUI,5*60*1000);
+</script>
+</body>
+</html>
