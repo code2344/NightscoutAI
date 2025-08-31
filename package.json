@@ -1,0 +1,62 @@
+{
+  "name": "nightscout-ai",
+  "version": "2.0.0",
+  "description": "Advanced AI-powered blood glucose prediction dashboard for Nightscout data with 99.9% accuracy target",
+  "main": "index.html",
+  "scripts": {
+    "dev": "python3 -m http.server 8000",
+    "serve": "python3 -m http.server 8000",
+    "test": "node test/test.js",
+    "test:watch": "nodemon --exec 'node test/test.js'",
+    "lint": "echo 'Linting not configured yet - see CONTRIBUTING.md'",
+    "build": "echo 'No build step required - pure client-side application'",
+    "start": "python3 -m http.server 8000"
+  },
+  "keywords": [
+    "nightscout",
+    "diabetes",
+    "machine-learning",
+    "tensorflow",
+    "blood-glucose",
+    "prediction",
+    "ai",
+    "healthcare",
+    "dashboard",
+    "lstm",
+    "deep-learning"
+  ],
+  "author": "NightscoutAI Contributors",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/code2344/NightscoutAI.git"
+  },
+  "bugs": {
+    "url": "https://github.com/code2344/NightscoutAI/issues"
+  },
+  "homepage": "https://github.com/code2344/NightscoutAI#readme",
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "dependencies": {},
+  "devDependencies": {},
+  "peerDependencies": {
+    "@tensorflow/tfjs": "^4.5.0",
+    "chart.js": "^4.0.0"
+  },
+  "browserslist": [
+    "> 1%",
+    "last 2 versions",
+    "not dead",
+    "not ie <= 11"
+  ],
+  "files": [
+    "index.html",
+    "config.js",
+    "css/",
+    "js/",
+    "README.md",
+    "LICENSE",
+    "CONTRIBUTING.md"
+  ]
+}
